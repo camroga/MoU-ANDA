@@ -258,7 +258,17 @@ class StyleGAN2Loss(Loss):
                 real_img_tmp = real_img_tmp.detach().requires_grad_(do_Dr1)
                 real_logits = self.run_D(real_img_tmp, real_c, sync=sync)
                 training_stats.report('Loss/scores/real', real_logits)
-                training_stats.report('Loss/signs/real', real_logits.sign())
+                epsilon = 0.1
+                real_signs = torch.where(
+                    real_logits > epsilon,
+                    torch.ones_like(real_logits),
+                    torch.where(
+                        real_logits < -epsilon,
+                        -torch.ones_like(real_logits),
+                        torch.zeros_like(real_logits)
+                    )
+                )
+                training_stats.report('Loss/signs/real', real_signs)
 
                 loss_Dreal = 0
                 if do_Dmain:
