@@ -181,16 +181,33 @@ class StyleGAN2Loss(Loss):
             logits = self.D(img, c)
         return logits
 
-    def adaptive_negative_augmentation(self, gen_img):
-        batch_size = gen_img.shape[0]
-        pseudo_flag = torch.ones([batch_size, 1, 1, 1], device=self.device)
-        pseudo_flag = torch.where(torch.rand([batch_size, 1, 1, 1], device=self.device) < self.augment_pipe.p,
-                                  pseudo_flag, torch.zeros_like(pseudo_flag))
-        if torch.allclose(pseudo_flag, torch.zeros_like(pseudo_flag)):
-            assert self.pseudo_data is not None
-            return 0.2 * self.pseudo_data * (1 - pseudo_flag) + 0.8 * gen_img * (1 + 0.25 * pseudo_flag)
-        else:            
+    def adaptive_negative_augmentation(self, gen_img, gen_c):
+        # Per-sample Margin-of-Uncertainty NDA gate: NDA is applied to a generated
+        # sample only if the discriminator is currently uncertain about it AND the
+        # (unchanged) ADA probability p does not skip it. This does not touch ADA's
+        # own p-update statistic (Loss/signs/real).
+        if self.augment_pipe is None or self.pseudo_data is None:
             return gen_img
+
+        batch_size = gen_img.shape[0]
+        epsilon = 0.1
+
+        # Extra D forward pass to probe per-sample uncertainty (no_grad: adds no
+        # autograd graph, but costs one additional discriminator forward per Dmain
+        # step, on top of the forward already done below for loss_Dgen).
+        with torch.no_grad():
+            probe_logits = self.run_D(gen_img, gen_c, sync=False)
+            probe_logits = probe_logits.view(batch_size, 1, 1, 1)
+
+        uncertain_mask = (probe_logits.abs() <= epsilon).float()
+        skip_mask = (torch.rand([batch_size, 1, 1, 1], device=self.device) < self.augment_pipe.p).float()
+        apply_nda_mask = uncertain_mask * (1 - skip_mask)
+
+        training_stats.report('Loss/mou_uncertain_fraction', uncertain_mask.mean())
+        training_stats.report('Loss/nda_applied_fraction', apply_nda_mask.mean())
+
+        mixed_img = 0.2 * self.pseudo_data + 0.8 * gen_img
+        return apply_nda_mask * mixed_img + (1 - apply_nda_mask) * gen_img
 
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
@@ -237,7 +254,9 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Dgen_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=False)
                 if self.augment_pipe is not None:
-                    gen_img_tmp = self.adaptive_negative_augmentation(gen_img)
+                    gen_img_tmp = self.adaptive_negative_augmentation(gen_img, gen_c)
+                else:
+                    gen_img_tmp = gen_img
                 gen_logits = self.run_D(gen_img_tmp, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -261,20 +280,7 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/logits_real_std', real_logits.std())
                 training_stats.report('Loss/logits_real_min', real_logits.min())
                 training_stats.report('Loss/logits_real_max', real_logits.max())
-                epsilon = 0.1
-                real_signs = torch.where(
-                    real_logits > epsilon,
-                    torch.ones_like(real_logits),
-                    torch.where(
-                        real_logits < -epsilon,
-                        -torch.ones_like(real_logits),
-                        torch.zeros_like(real_logits)
-                    )
-                )
-                inside_margin = (real_logits.abs() <= epsilon).float().mean()
-
-                training_stats.report('Loss/inside_margin', inside_margin)
-                training_stats.report('Loss/signs/real', real_signs)
+                training_stats.report('Loss/signs/real', real_logits.sign())
 
                 loss_Dreal = 0
                 if do_Dmain:
