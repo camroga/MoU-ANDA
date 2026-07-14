@@ -85,6 +85,13 @@ def save_image_grid(img, fname, drange, grid_size):
 
 #----------------------------------------------------------------------------
 
+def _update_ada_p(stats, stat_name, target, p, batch_size, interval, kimg, device):
+    stats.update()
+    adjust = np.sign(stats[stat_name] - target) * (batch_size * interval) / (kimg * 1000)
+    p.copy_((p + adjust).max(misc.constant(0, device=device)))
+
+#----------------------------------------------------------------------------
+
 def training_loop(
     run_dir                 = '.',      # Output directory.
     training_set_kwargs     = {},       # Options for training set.
@@ -171,11 +178,13 @@ def training_loop(
         print('Setting up augmentation...')
     augment_pipe = None
     ada_stats = None
+    anda_stats = None
     if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
         augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
         augment_pipe.p.copy_(torch.as_tensor(augment_p))
         if ada_target is not None:
             ada_stats = training_stats.Collector(regex='Loss/signs/real')
+            anda_stats = training_stats.Collector(regex='Loss/signs/real_anda')
 
     # Distribute across GPUs.
     if rank == 0:
@@ -193,6 +202,10 @@ def training_loop(
     if rank == 0:
         print('Setting up training phases...')
     loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
+    if augment_pipe is not None:
+        # Mirrors augment_pipe.p's initial value. NOT restored on resume (see note
+        # on StyleGAN2Loss.p_anda in loss.py) — resuming resets p_anda to augment_p.
+        loss.p_anda.copy_(torch.as_tensor(augment_p))
     phases = []
     for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
         if reg_interval is None:
@@ -310,9 +323,11 @@ def training_loop(
 
         # Execute ADA heuristic.
         if (ada_stats is not None) and (batch_idx % ada_interval == 0):
-            ada_stats.update()
-            adjust = np.sign(ada_stats['Loss/signs/real'] - ada_target) * (batch_size * ada_interval) / (ada_kimg * 1000)
-            augment_pipe.p.copy_((augment_pipe.p + adjust).max(misc.constant(0, device=device)))
+            _update_ada_p(ada_stats, 'Loss/signs/real', ada_target, augment_pipe.p, batch_size, ada_interval, ada_kimg, device)
+
+        # Execute ANDA heuristic (independent controller; never touches augment_pipe.p).
+        if (anda_stats is not None) and (batch_idx % ada_interval == 0):
+            _update_ada_p(anda_stats, 'Loss/signs/real_anda', ada_target, loss.p_anda, batch_size, ada_interval, ada_kimg, device)
 
         # Perform maintenance tasks once per tick.
         done = (cur_nimg >= total_kimg * 1000)

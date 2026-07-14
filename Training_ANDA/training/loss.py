@@ -160,6 +160,11 @@ class StyleGAN2Loss(Loss):
         self.pl_mean = torch.zeros([], device=device)
         self.with_dataaug = with_dataaug
         self.pseudo_data = None
+        # Independent controller, decoupled from augment_pipe.p (ADA). NOTE: this is
+        # plain object state, not a registered nn.Module buffer, so it is NOT saved
+        # in network-snapshot pickles. Resuming from a snapshot resets p_anda to its
+        # initial value instead of restoring the last adapted value (not implemented here).
+        self.p_anda = torch.zeros([], device=device)
 
     def run_G(self, z, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -182,14 +187,22 @@ class StyleGAN2Loss(Loss):
         return logits
 
     def adaptive_negative_augmentation(self, gen_img):
+        training_stats.report('Loss/anda_p', self.p_anda)
+        training_stats.report('Loss/ada_p', self.augment_pipe.p)
         batch_size = gen_img.shape[0]
         pseudo_flag = torch.ones([batch_size, 1, 1, 1], device=self.device)
-        pseudo_flag = torch.where(torch.rand([batch_size, 1, 1, 1], device=self.device) < self.augment_pipe.p,
+        pseudo_flag = torch.where(torch.rand([batch_size, 1, 1, 1], device=self.device) < self.p_anda,
                                   pseudo_flag, torch.zeros_like(pseudo_flag))
-        if torch.allclose(pseudo_flag, torch.zeros_like(pseudo_flag)):
+        # Batch-level gate is UNCHANGED from the original repository: NDA is applied
+        # only when every sample in the batch drew rand >= p_anda (pseudo_flag all-zero).
+        # This experiment isolates the controller swap (augment_pipe.p -> p_anda) only;
+        # the all-or-nothing batch behavior itself is intentionally left untouched.
+        nda_applied = torch.allclose(pseudo_flag, torch.zeros_like(pseudo_flag))
+        training_stats.report('Loss/nda_batch_applied', float(nda_applied))
+        if nda_applied:
             assert self.pseudo_data is not None
             return 0.2 * self.pseudo_data * (1 - pseudo_flag) + 0.8 * gen_img * (1 + 0.25 * pseudo_flag)
-        else:            
+        else:
             return gen_img
 
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
@@ -259,6 +272,20 @@ class StyleGAN2Loss(Loss):
                 real_logits = self.run_D(real_img_tmp, real_c, sync=sync)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())
+
+                # ANDA-only statistics. Independent of ADA's Loss/signs/real above.
+                epsilon = 0.1
+                anda_signs = torch.where(
+                    real_logits > epsilon,
+                    torch.ones_like(real_logits),
+                    torch.where(
+                        real_logits < -epsilon,
+                        -torch.ones_like(real_logits),
+                        torch.zeros_like(real_logits)
+                    )
+                )
+                training_stats.report('Loss/signs/real_anda', anda_signs)
+                training_stats.report('Loss/anda_inside_margin', (real_logits.abs() <= epsilon).float().mean())
 
                 loss_Dreal = 0
                 if do_Dmain:
