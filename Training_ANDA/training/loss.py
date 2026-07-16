@@ -181,16 +181,59 @@ class StyleGAN2Loss(Loss):
             logits = self.D(img, c)
         return logits
 
-    def adaptive_negative_augmentation(self, gen_img):
-        batch_size = gen_img.shape[0]
-        pseudo_flag = torch.ones([batch_size, 1, 1, 1], device=self.device)
-        pseudo_flag = torch.where(torch.rand([batch_size, 1, 1, 1], device=self.device) < self.augment_pipe.p,
-                                  pseudo_flag, torch.zeros_like(pseudo_flag))
-        if torch.allclose(pseudo_flag, torch.zeros_like(pseudo_flag)):
-            assert self.pseudo_data is not None
-            return 0.2 * self.pseudo_data * (1 - pseudo_flag) + 0.8 * gen_img * (1 + 0.25 * pseudo_flag)
-        else:            
+    def adaptive_negative_augmentation(self, gen_img, gen_c):
+        # Apply NDA selectively to generated samples that the discriminator
+        # does not confidently classify as fake, while preserving the original
+        # adaptive stochastic probability.
+        if self.augment_pipe is None or self.pseudo_data is None:
             return gen_img
+
+        batch_size = gen_img.shape[0]
+        epsilon = 0.2
+
+        with torch.no_grad():
+            probe_logits = self.run_D(gen_img, gen_c, sync=False)
+
+        candidate_mask = (
+            probe_logits >= -epsilon
+        ).to(dtype=gen_img.dtype).view(batch_size, 1, 1, 1)
+
+        skip_mask = (
+            torch.rand(
+                [batch_size, 1, 1, 1],
+                device=self.device
+            ) < self.augment_pipe.p
+        ).to(dtype=gen_img.dtype)
+
+        apply_nda_mask = candidate_mask * (1 - skip_mask)
+
+        training_stats.report(
+            'Loss/cgnda_candidate_fraction',
+            candidate_mask.mean()
+        )
+        training_stats.report(
+            'Loss/cgnda_applied_fraction',
+            apply_nda_mask.mean()
+        )
+        training_stats.report(
+            'Loss/cgnda_probe_logit_mean',
+            probe_logits.mean()
+        )
+        training_stats.report(
+            'Loss/cgnda_probe_logit_min',
+            probe_logits.min()
+        )
+        training_stats.report(
+            'Loss/cgnda_probe_logit_max',
+            probe_logits.max()
+        )
+
+        mixed_img = 0.2 * self.pseudo_data + 0.8 * gen_img
+
+        return (
+            apply_nda_mask * mixed_img
+            + (1 - apply_nda_mask) * gen_img
+        )
 
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
@@ -237,7 +280,7 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Dgen_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=False)
                 if self.augment_pipe is not None:
-                    gen_img_tmp = self.adaptive_negative_augmentation(gen_img)
+                    gen_img_tmp = self.adaptive_negative_augmentation(gen_img, gen_c)
                 gen_logits = self.run_D(gen_img_tmp, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
