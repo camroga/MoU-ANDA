@@ -88,8 +88,8 @@ def rand_bbox(size, lam):
     W = size[2]
     H = size[3]
     cut_rat = np.sqrt(1. - lam)
-    cut_w = np.int(W * cut_rat)
-    cut_h = np.int(H * cut_rat)
+    cut_w = int(W * cut_rat)
+    cut_h = int(H * cut_rat)
 
     # uniform
     cx = np.random.randint(W)
@@ -144,6 +144,15 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
+    # Negative Transformation Pool (NTP): maps a transformation name to the
+    # existing repository function that implements it. Add entries here if a
+    # new transformation is introduced.
+    _NEGATIVE_TRANSFORMATIONS = {
+        'jigsaw': lambda real_img: jigsaw_k(real_img, k=2),
+        'stitch': lambda real_img: stitch(real_img, k=2),
+        'cutmix': lambda real_img: cut_mix(real_img, beta=1.0),
+    }
+
     def __init__(self, device, G_mapping, G_synthesis, D, diffaugment='', augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, with_dataaug=False):
         super().__init__()
         self.device = device
@@ -160,6 +169,18 @@ class StyleGAN2Loss(Loss):
         self.pl_mean = torch.zeros([], device=device)
         self.with_dataaug = with_dataaug
         self.pseudo_data = None
+
+        # NTP pool configuration: (transformation name, sampling probability).
+        # This is the single place that defines the distribution used to pick
+        # a negative transformation for pseudo_data at each training iteration.
+        # To reproduce the original single-transformation ANDA behavior, set
+        # this to [('jigsaw', 1.0)].
+        self.negative_transformation_pool = [
+            ('jigsaw', 0.34),
+            ('stitch', 0.33),
+            ('cutmix', 0.33),
+        ]
+        self._validate_negative_transformation_pool()
 
     def run_G(self, z, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -180,6 +201,70 @@ class StyleGAN2Loss(Loss):
         with misc.ddp_sync(self.D, sync):
             logits = self.D(img, c)
         return logits
+
+    def _validate_negative_transformation_pool(self):
+        """
+        Validate the Negative Transformation Pool configuration.
+
+        Ensures that:
+        - every transformation name is supported,
+        - there are no duplicated entries,
+        - all probabilities are non-negative,
+        - probabilities sum to approximately 1.0.
+
+        Raises a ValueError if the configuration is invalid.
+        """
+        names = [name for name, _prob in self.negative_transformation_pool]
+        probs = [prob for _name, prob in self.negative_transformation_pool]
+
+        unknown = [name for name in names if name not in self._NEGATIVE_TRANSFORMATIONS]
+        if unknown:
+            raise ValueError(
+                f'Unknown negative transformation(s) {unknown} in negative_transformation_pool. '
+                f'Available transformations: {list(self._NEGATIVE_TRANSFORMATIONS.keys())}'
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(f'Duplicate transformation names in negative_transformation_pool: {names}')
+        if any(prob < 0 for prob in probs):
+            raise ValueError(f'negative_transformation_pool probabilities must be non-negative, got {probs}')
+        total = sum(probs)
+        if not np.isclose(total, 1.0, atol=1e-3):
+            raise ValueError(f'negative_transformation_pool probabilities must sum to ~1.0, got {total} ({probs})')
+
+    def _sample_negative_transformation(self):
+        """
+        Randomly sample one transformation from the Negative Transformation Pool
+        according to the configured probabilities.
+
+        One transformation is selected per training batch.
+        """
+        # Sampling is a single scalar, batch-level decision, independent of
+        # the (potentially GPU-resident) image tensors, so the categorical
+        # draw is done on CPU to avoid any unnecessary CPU-GPU synchronization.
+        # It intentionally is not synchronized across distributed workers:
+        # ANDA's pseudo-negative construction has no cross-worker dependency,
+        # so each process may independently sample its own transformation.
+        names = [name for name, _prob in self.negative_transformation_pool]
+        probs = torch.tensor([prob for _name, prob in self.negative_transformation_pool], dtype=torch.float64)
+        index = torch.multinomial(probs, num_samples=1).item()
+        return names[index]
+
+    def _build_pseudo_data(self, real_img):
+        """
+        Construct pseudo-negative samples.
+
+        A single transformation is first sampled from the Negative Transformation
+        Pool and then applied to the current batch of real images. The selected
+        transformation is also logged through training statistics.
+        """
+        # Sample one transformation from the pool
+        selected = self._sample_negative_transformation()
+        # Apply the selected transformation to generate pseudo-negative data
+        pseudo_data = self._NEGATIVE_TRANSFORMATIONS[selected](real_img)
+        # Log the selected transformation (1 for active, 0 otherwise)
+        for name, _prob in self.negative_transformation_pool:
+            training_stats.report(f'NTP/{name}', 1.0 if name == selected else 0.0)
+        return pseudo_data
 
     def adaptive_negative_augmentation(self, gen_img):
         batch_size = gen_img.shape[0]
@@ -203,8 +288,8 @@ class StyleGAN2Loss(Loss):
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl)) # May get synced by Gpl.
-                # Update pseudo data
-                self.pseudo_data = jigsaw_k(real_img, k=2)
+                # Update pseudo data: sample one transformation from the NTP pool per batch
+                self.pseudo_data = self._build_pseudo_data(real_img)
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
