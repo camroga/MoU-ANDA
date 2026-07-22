@@ -144,7 +144,7 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, diffaugment='', augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, with_dataaug=False):
+    def __init__(self, device, G_mapping, G_synthesis, D, diffaugment='', augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, with_dataaug=False, mou_epsilon=0.1):
         super().__init__()
         self.device = device
         self.G_mapping = G_mapping
@@ -160,6 +160,11 @@ class StyleGAN2Loss(Loss):
         self.pl_mean = torch.zeros([], device=device)
         self.with_dataaug = with_dataaug
         self.pseudo_data = None
+
+        # Margin of Uncertainty: threshold for the Loss/signs/real_anda statistic
+        # that drives the independent ANDA controller (augment_pipe.p_anda).
+        # Never used to gate ADA or to select/filter images.
+        self.mou_epsilon = mou_epsilon
 
     def run_G(self, z, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -182,14 +187,15 @@ class StyleGAN2Loss(Loss):
         return logits
 
     def adaptive_negative_augmentation(self, gen_img):
-        batch_size = gen_img.shape[0]
-        pseudo_flag = torch.ones([batch_size, 1, 1, 1], device=self.device)
-        pseudo_flag = torch.where(torch.rand([batch_size, 1, 1, 1], device=self.device) < self.augment_pipe.p,
-                                  pseudo_flag, torch.zeros_like(pseudo_flag))
-        if torch.allclose(pseudo_flag, torch.zeros_like(pseudo_flag)):
+        # Direct probability semantics, independent of ADA: p_anda=0 never
+        # applies ANDA, p_anda=1 always applies it. augment_pipe.p_anda is the
+        # only source of truth for this decision (no self.p_anda on this class,
+        # no reuse of augment_pipe.p).
+        apply_anda = torch.rand([], device=self.device) < self.augment_pipe.p_anda
+        if apply_anda:
             assert self.pseudo_data is not None
-            return 0.2 * self.pseudo_data * (1 - pseudo_flag) + 0.8 * gen_img * (1 + 0.25 * pseudo_flag)
-        else:            
+            return 0.2 * self.pseudo_data + 0.8 * gen_img
+        else:
             return gen_img
 
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
@@ -238,6 +244,8 @@ class StyleGAN2Loss(Loss):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=False)
                 if self.augment_pipe is not None:
                     gen_img_tmp = self.adaptive_negative_augmentation(gen_img)
+                else:
+                    gen_img_tmp = gen_img
                 gen_logits = self.run_D(gen_img_tmp, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -259,6 +267,20 @@ class StyleGAN2Loss(Loss):
                 real_logits = self.run_D(real_img_tmp, real_c, sync=sync)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())
+
+                # Margin of Uncertainty statistic driving the independent ANDA
+                # controller (augment_pipe.p_anda). Independent of, and does not
+                # replace, ADA's own Loss/signs/real above.
+                mou = torch.where(
+                    real_logits > self.mou_epsilon,
+                    torch.ones_like(real_logits),
+                    torch.where(
+                        real_logits < -self.mou_epsilon,
+                        -torch.ones_like(real_logits),
+                        torch.zeros_like(real_logits),
+                    ),
+                )
+                training_stats.report('Loss/signs/real_anda', mou)
 
                 loss_Dreal = 0
                 if do_Dmain:
