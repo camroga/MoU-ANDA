@@ -109,6 +109,9 @@ def training_loop(
     ada_target              = None,     # ADA target value. None = fixed p.
     ada_interval            = 4,        # How often to perform ADA adjustment?
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
+    anda_target             = None,     # ANDA target value, independent of ADA. None = ANDA controller disabled.
+    anda_interval           = 4,        # How often to perform ANDA adjustment?
+    anda_kimg               = 500,      # ANDA adjustment speed, measured in how many kimg it takes for p_anda to increase/decrease by one unit.
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
     kimg_per_tick           = 4,        # Progress snapshot interval.
     image_snapshot_ticks    = 50,       # How often to save image snapshots? None = disable.
@@ -171,11 +174,14 @@ def training_loop(
         print('Setting up augmentation...')
     augment_pipe = None
     ada_stats = None
-    if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
+    anda_stats = None
+    if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None or anda_target is not None):
         augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
         augment_pipe.p.copy_(torch.as_tensor(augment_p))
         if ada_target is not None:
             ada_stats = training_stats.Collector(regex='Loss/signs/real')
+        if anda_target is not None:
+            anda_stats = training_stats.Collector(regex='Loss/signs/real_anda')
 
     # Distribute across GPUs.
     if rank == 0:
@@ -314,6 +320,12 @@ def training_loop(
             adjust = np.sign(ada_stats['Loss/signs/real'] - ada_target) * (batch_size * ada_interval) / (ada_kimg * 1000)
             augment_pipe.p.copy_((augment_pipe.p + adjust).max(misc.constant(0, device=device)))
 
+        # Execute ANDA heuristic (independent controller; never touches augment_pipe.p).
+        if (anda_stats is not None) and (batch_idx % anda_interval == 0):
+            anda_stats.update()
+            adjust_anda = np.sign(anda_stats['Loss/signs/real_anda'] - anda_target) * (batch_size * anda_interval) / (anda_kimg * 1000)
+            augment_pipe.p_anda.copy_((augment_pipe.p_anda + adjust_anda).clamp(0, 1))
+
         # Perform maintenance tasks once per tick.
         done = (cur_nimg >= total_kimg * 1000)
         if (not done) and (cur_tick != 0) and (cur_nimg < tick_start_nimg + kimg_per_tick * 1000):
@@ -332,6 +344,7 @@ def training_loop(
         fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
+        fields += [f"anda_p {training_stats.report0('Progress/anda_p', float(augment_pipe.p_anda.cpu()) if augment_pipe is not None else 0):.3f}"]
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
         if rank == 0:

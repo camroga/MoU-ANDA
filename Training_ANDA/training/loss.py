@@ -88,8 +88,8 @@ def rand_bbox(size, lam):
     W = size[2]
     H = size[3]
     cut_rat = np.sqrt(1. - lam)
-    cut_w = np.int(W * cut_rat)
-    cut_h = np.int(H * cut_rat)
+    cut_w = int(W * cut_rat)
+    cut_h = int(H * cut_rat)
 
     # uniform
     cx = np.random.randint(W)
@@ -144,7 +144,16 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, diffaugment='', augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, with_dataaug=False):
+    # Negative Transformation Pool (NTP): maps a transformation name to the
+    # existing repository function that implements it. Add entries here if a
+    # new transformation is introduced.
+    _NEGATIVE_TRANSFORMATIONS = {
+        'jigsaw': lambda real_img: jigsaw_k(real_img, k=2),
+        'stitch': lambda real_img: stitch(real_img, k=2),
+        'cutmix': lambda real_img: cut_mix(real_img, beta=1.0),
+    }
+
+    def __init__(self, device, G_mapping, G_synthesis, D, diffaugment='', augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, with_dataaug=False, mou_epsilon=0.1, negative_transformation_pool=None):
         super().__init__()
         self.device = device
         self.G_mapping = G_mapping
@@ -159,7 +168,22 @@ class StyleGAN2Loss(Loss):
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
         self.with_dataaug = with_dataaug
-        self.pseudo_data = None
+
+        # Margin of Uncertainty: threshold used only for the Loss/signs/real_anda
+        # statistic that drives the independent ANDA controller (augment_pipe.p_anda).
+        # Never used to gate ADA or to select/filter images.
+        self.mou_epsilon = mou_epsilon
+
+        # NTP pool configuration: (transformation name, sampling probability).
+        # To reproduce a single-transformation ANDA, set this to [('jigsaw', 1.0)].
+        if negative_transformation_pool is None:
+            negative_transformation_pool = [
+                ('jigsaw', 0.70),
+                ('stitch', 0.15),
+                ('cutmix', 0.15),
+            ]
+        self.negative_transformation_pool = negative_transformation_pool
+        self._validate_negative_transformation_pool()
 
     def run_G(self, z, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -181,15 +205,86 @@ class StyleGAN2Loss(Loss):
             logits = self.D(img, c)
         return logits
 
-    def adaptive_negative_augmentation(self, gen_img):
-        batch_size = gen_img.shape[0]
-        pseudo_flag = torch.ones([batch_size, 1, 1, 1], device=self.device)
-        pseudo_flag = torch.where(torch.rand([batch_size, 1, 1, 1], device=self.device) < self.augment_pipe.p,
-                                  pseudo_flag, torch.zeros_like(pseudo_flag))
-        if torch.allclose(pseudo_flag, torch.zeros_like(pseudo_flag)):
-            assert self.pseudo_data is not None
-            return 0.2 * self.pseudo_data * (1 - pseudo_flag) + 0.8 * gen_img * (1 + 0.25 * pseudo_flag)
-        else:            
+    def _validate_negative_transformation_pool(self):
+        """
+        Validate the Negative Transformation Pool configuration.
+
+        Ensures that:
+        - the pool is not empty,
+        - every transformation name is supported,
+        - there are no duplicated entries,
+        - all probabilities are non-negative,
+        - probabilities sum to approximately 1.0.
+
+        Raises a ValueError if the configuration is invalid.
+        """
+        if len(self.negative_transformation_pool) == 0:
+            raise ValueError('negative_transformation_pool must not be empty.')
+
+        names = [name for name, _prob in self.negative_transformation_pool]
+        probs = [prob for _name, prob in self.negative_transformation_pool]
+
+        unknown = [name for name in names if name not in self._NEGATIVE_TRANSFORMATIONS]
+        if unknown:
+            raise ValueError(
+                f'Unknown negative transformation(s) {unknown} in negative_transformation_pool. '
+                f'Available transformations: {list(self._NEGATIVE_TRANSFORMATIONS.keys())}'
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(f'Duplicate transformation names in negative_transformation_pool: {names}')
+        if any(prob < 0 for prob in probs):
+            raise ValueError(f'negative_transformation_pool probabilities must be non-negative, got {probs}')
+        total = sum(probs)
+        if not np.isclose(total, 1.0, atol=1e-3):
+            raise ValueError(f'negative_transformation_pool probabilities must sum to ~1.0, got {total} ({probs})')
+
+    def _sample_negative_transformation(self):
+        """
+        Randomly sample one transformation from the Negative Transformation Pool
+        according to the configured probabilities. Exactly one transformation is
+        selected per training batch.
+        """
+        # Sampling is a single scalar, batch-level decision, independent of the
+        # (potentially GPU-resident) image tensors, so the categorical draw is
+        # done on CPU to avoid any unnecessary CPU-GPU synchronization.
+        names = [name for name, _prob in self.negative_transformation_pool]
+        probs = torch.tensor([prob for _name, prob in self.negative_transformation_pool], dtype=torch.float64)
+        index = torch.multinomial(probs, num_samples=1).item()
+        return names[index]
+
+    def _build_pseudo_data(self, real_img):
+        """
+        Construct ANDA pseudo-negative samples from the real image batch.
+
+        One transformation is sampled from the Negative Transformation Pool and
+        applied to the whole real_img batch (no image sub-selection: ANDA's
+        Negative Transformation Pool only decides HOW pseudo-negatives are
+        built, not WHICH real images are used).
+
+        stitch/cut_mix permute across the batch dimension (get_perm) and would
+        loop forever on a batch of size 1; jigsaw only permutes patches within
+        each image independently and has no such restriction. So a batch of
+        size 1 falls back to jigsaw regardless of what was sampled, to avoid
+        that hang.
+        """
+        selected = self._sample_negative_transformation()
+        if real_img.shape[0] == 1 and selected in ('stitch', 'cutmix'):
+            selected = 'jigsaw'
+        pseudo_data = self._NEGATIVE_TRANSFORMATIONS[selected](real_img)
+        for name, _prob in self.negative_transformation_pool:
+            training_stats.report(f'NTP/{name}', 1.0 if name == selected else 0.0)
+        return pseudo_data
+
+    def adaptive_negative_augmentation(self, gen_img, pseudo_data):
+        # Direct probability semantics, independent of ADA: p_anda=0 never
+        # applies ANDA, p_anda=1 always applies it. augment_pipe.p_anda is the
+        # only source of truth for this decision (no self.p_anda on this class,
+        # no reuse of augment_pipe.p).
+        apply_anda = torch.rand([], device=self.device) < self.augment_pipe.p_anda
+        if apply_anda:
+            assert pseudo_data is not None
+            return 0.2 * pseudo_data + 0.8 * gen_img
+        else:
             return gen_img
 
     def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
@@ -203,8 +298,6 @@ class StyleGAN2Loss(Loss):
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl)) # May get synced by Gpl.
-                # Update pseudo data
-                self.pseudo_data = jigsaw_k(real_img, k=2)
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -237,7 +330,13 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Dgen_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=False)
                 if self.augment_pipe is not None:
-                    gen_img_tmp = self.adaptive_negative_augmentation(gen_img)
+                    # ANDA: pseudo_data is built here, in the discriminator phase where
+                    # it's consumed, as a local variable (not self.pseudo_data) so it
+                    # can never go stale across phases/iterations.
+                    pseudo_data = self._build_pseudo_data(real_img)
+                    gen_img_tmp = self.adaptive_negative_augmentation(gen_img, pseudo_data)
+                else:
+                    gen_img_tmp = gen_img
                 gen_logits = self.run_D(gen_img_tmp, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -259,6 +358,20 @@ class StyleGAN2Loss(Loss):
                 real_logits = self.run_D(real_img_tmp, real_c, sync=sync)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())
+
+                # Margin of Uncertainty statistic driving the independent ANDA
+                # controller (augment_pipe.p_anda). Independent of, and does not
+                # replace, ADA's own Loss/signs/real above.
+                mou = torch.where(
+                    real_logits > self.mou_epsilon,
+                    torch.ones_like(real_logits),
+                    torch.where(
+                        real_logits < -self.mou_epsilon,
+                        -torch.ones_like(real_logits),
+                        torch.zeros_like(real_logits),
+                    ),
+                )
+                training_stats.report('Loss/signs/real_anda', mou)
 
                 loss_Dreal = 0
                 if do_Dmain:
