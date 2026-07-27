@@ -191,6 +191,10 @@ class StyleGAN2Loss(Loss):
         # only source of truth for this decision (no self.p_anda on this class,
         # no reuse of augment_pipe.p).
         apply_anda = torch.rand([], device=gen_img.device) < self.augment_pipe.p_anda
+        training_stats.report(
+            'ANDA/applied',
+            apply_anda.to(torch.float32),
+        )
         if apply_anda:
             assert pseudo_data is not None
             return 0.2 * pseudo_data + 0.8 * gen_img
