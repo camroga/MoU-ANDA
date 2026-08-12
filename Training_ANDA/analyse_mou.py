@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-
 # ---------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------
@@ -21,6 +20,10 @@ METRIC_PATH = (
 OUTPUT = ROOT / "analysis_mou"
 OUTPUT.mkdir(exist_ok=True)
 
+# Current calibration grid
+targets = [0.50, 0.55, 0.60, 0.65]
+k_values = [500, 750, 1000]
+epsilons = [0.10, 0.20, 0.30]
 
 # ---------------------------------------------------------
 # READ EXPERIMENTS
@@ -43,6 +46,14 @@ for folder in ROOT.glob("target-*"):
     k_anda = int(match.group(2))
     epsilon = float(match.group(3).replace("p", "."))
     seed = int(match.group(4))
+
+    # Ignore experiments outside the current grid
+    if (
+        target not in targets
+        or k_anda not in k_values
+        or epsilon not in epsilons
+    ):
+        continue
 
     metric_file = folder / METRIC_PATH
 
@@ -102,7 +113,6 @@ for folder in ROOT.glob("target-*"):
         "final_fid": final_fid,
     })
 
-
 # ---------------------------------------------------------
 # CREATE TABLE
 # ---------------------------------------------------------
@@ -131,30 +141,35 @@ print(
     ].head(10).to_string(index=False)
 )
 
+table_df = df[
+    [
+        "rank",
+        "target",
+        "K",
+        "epsilon",
+        "min_fid",
+        "min_kimg",
+        "final_fid",
+    ]
+]
 
 # Complete ranked table
-df.to_latex(
+table_df.to_latex(
     OUTPUT / "mou_results_table.tex",
     index=False,
     float_format="%.4f",
 )
 
 # Top 3 only
-df.head(3).to_latex(
+table_df.head(3).to_latex(
     OUTPUT / "mou_top3_table.tex",
     index=False,
     float_format="%.4f",
 )
 
-
 # ---------------------------------------------------------
 # HEATMAP FUNCTION
 # ---------------------------------------------------------
-
-targets = [0.50, 0.55, 0.60, 0.65, 0.70]
-k_values = [250, 500, 750, 1000]
-epsilons = [0.10, 0.20, 0.30]
-
 
 def make_heatmap(column, title, filename):
 
@@ -243,7 +258,6 @@ def make_heatmap(column, title, filename):
 
     plt.close()
 
-
 # ---------------------------------------------------------
 # CREATE THE TWO FIGURES
 # ---------------------------------------------------------
@@ -259,6 +273,5 @@ make_heatmap(
     "FID at 400 kimg",
     "final_fid_heatmap.pdf"
 )
-
 
 print("\nFiles created in:", OUTPUT)

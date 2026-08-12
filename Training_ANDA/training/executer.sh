@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=1-00:00:00
-#SBATCH --array=0-59
+#SBATCH --array=0-35
 #SBATCH --output=/mnt/scratch2/users/40491193/workspace/thesis/calibration/logs/%x-%A_%a.out
 #SBATCH --error=/mnt/scratch2/users/40491193/workspace/thesis/calibration/logs/%x-%A_%a.err
 
@@ -21,8 +21,8 @@ DATASET="/users/40491193/obama.zip"
 OUTDIR_ROOT="/mnt/scratch2/users/40491193/workspace/thesis/calibration/runs/mou-independent-anda-grid"
 
 # Values to calibrate.
-ANDA_TARGETS=(0.50 0.55 0.60 0.65 0.70)
-ANDA_KIMGS=(250 500 750 1000)
+ANDA_TARGETS=(0.50 0.55 0.60 0.65)
+ANDA_KIMGS=(500 750 1000)
 MOU_EPSILONS=(0.10 0.20 0.30)
 
 # Fixed values.
