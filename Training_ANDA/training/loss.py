@@ -286,7 +286,11 @@ class StyleGAN2Loss(Loss):
                         torch.zeros_like(real_logits),
                     ),
                 )
+                # Report the MoU statistic to the training stats. This is used by the independent ANDA controller to adjust the 
+                # augmentation probability (augment_pipe.p_anda) based on the discriminator's uncertainty.
                 training_stats.report('Loss/signs/real_anda', mou)
+                # Report the fraction of real images that fall within the margin of uncertainty.
+                training_stats.report('MoU/uncertain', (mou == 0).to(torch.float32))
 
                 loss_Dreal = 0
                 if do_Dmain:
