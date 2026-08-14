@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mou-anda-target-recalibration
-#SBATCH --partition=k2-gpu-v100
-#SBATCH --gres=gpu:1
+#SBATCH --partition=k2-gpu-a100mig
+#SBATCH --gres=gpu:3g.40gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=1-00:00:00
