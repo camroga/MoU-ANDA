@@ -1,27 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=anda-original-baseline
-#SBATCH --partition=k2-gpu-a100mig
-#SBATCH --gres=gpu:3g.40gb:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=1-00:00:00
-#SBATCH --array=0-5
-#SBATCH --output=/mnt/scratch2/users/40491193/workspace/thesis/baseline/logs/%x-%A_%a.out
-#SBATCH --error=/mnt/scratch2/users/40491193/workspace/thesis/baseline/logs/%x-%A_%a.err
 
 set -euo pipefail
 
-module purge
-module load python3/3.10.5/gcc-9.3.0
+PROJECT_DIR="/workspace/thesis/baseline"
 
-source /users/40491193/venvs/anda_old/bin/activate
+OBAMA_DATASET="/workspace/thesis/obama.zip"
+PANDA_DATASET="/workspace/thesis/100-shot-panda.zip"
 
-PROJECT_DIR="/mnt/scratch2/users/40491193/workspace/thesis/baseline"
-
-OBAMA_DATASET="/users/40491193/obama.zip"
-PANDA_DATASET="/users/40491193/100-shot-panda.zip"
-
-OUTDIR_ROOT="/mnt/scratch2/users/40491193/workspace/thesis/baseline/runs/anda-original"
+OUTDIR_ROOT="/workspace/thesis/baseline/runs/anda-original"
+LOGDIR="/workspace/thesis/baseline/logs"
 
 DATASETS=(
     "$OBAMA_DATASET"
@@ -37,89 +24,83 @@ SEEDS=(2 3 4)
 
 TRAIN_KIMG=500
 
-NUM_SEEDS=${#SEEDS[@]}
-NUM_DATASETS=${#DATASETS[@]}
-TOTAL_EXPERIMENTS=$((NUM_DATASETS * NUM_SEEDS))
-
-if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= TOTAL_EXPERIMENTS )); then
-    echo "Invalid array index: ${SLURM_ARRAY_TASK_ID}" >&2
-    exit 1
-fi
-
-DATASET_INDEX=$((SLURM_ARRAY_TASK_ID / NUM_SEEDS))
-SEED_INDEX=$((SLURM_ARRAY_TASK_ID % NUM_SEEDS))
-
-DATASET="${DATASETS[$DATASET_INDEX]}"
-DATASET_NAME="${DATASET_NAMES[$DATASET_INDEX]}"
-SEED="${SEEDS[$SEED_INDEX]}"
-
-EXPERIMENT_NAME="anda-original-${DATASET_NAME}-seed-${SEED}"
-OUTDIR="${OUTDIR_ROOT}/${EXPERIMENT_NAME}"
+mkdir -p "$OUTDIR_ROOT" "$LOGDIR"
 
 cd "$PROJECT_DIR"
-
-mkdir -p "$OUTDIR"
 
 GIT_BRANCH="$(git branch --show-current)"
 GIT_COMMIT="$(git rev-parse --short HEAD)"
 
-echo "=========================================="
-echo "Original ANDA baseline"
-echo "Job ID:           ${SLURM_JOB_ID}"
-echo "Array job ID:     ${SLURM_ARRAY_JOB_ID}"
-echo "Array task:       ${SLURM_ARRAY_TASK_ID}"
-echo "Experiment:       ${EXPERIMENT_NAME}"
-echo "Dataset:          ${DATASET_NAME}"
-echo "Dataset path:     ${DATASET}"
-echo "Training kimg:    ${TRAIN_KIMG}"
-echo "Seed:             ${SEED}"
-echo "Output:           ${OUTDIR}"
-echo "Git branch:       ${GIT_BRANCH}"
-echo "Git commit:       ${GIT_COMMIT}"
-echo "=========================================="
+echo "===== GPU CHECK ====="
+nvidia-smi
+echo "====================="
 
-cat > "${OUTDIR}/submitted_configuration.txt" <<EOF
+PIDS=()
+TASK_INDEX=0
+
+for DATASET_INDEX in "${!DATASETS[@]}"; do
+    for SEED_INDEX in "${!SEEDS[@]}"; do
+
+        GPU_ID=$((TASK_INDEX + 3))
+
+        DATASET="${DATASETS[$DATASET_INDEX]}"
+        DATASET_NAME="${DATASET_NAMES[$DATASET_INDEX]}"
+        SEED="${SEEDS[$SEED_INDEX]}"
+
+        EXPERIMENT_NAME="anda-original-${DATASET_NAME}-seed-${SEED}"
+        OUTDIR="${OUTDIR_ROOT}/${EXPERIMENT_NAME}"
+        LOGFILE="${LOGDIR}/${EXPERIMENT_NAME}.log"
+
+        mkdir -p "$OUTDIR"
+
+        cat > "${OUTDIR}/submitted_configuration.txt" <<EOF
 experiment=${EXPERIMENT_NAME}
 method=original_anda
+gpu=${GPU_ID}
 dataset=${DATASET_NAME}
 dataset_path=${DATASET}
 training_kimg=${TRAIN_KIMG}
 seed=${SEED}
 git_branch=${GIT_BRANCH}
 git_commit=${GIT_COMMIT}
-slurm_job_id=${SLURM_JOB_ID}
-slurm_array_job_id=${SLURM_ARRAY_JOB_ID}
-slurm_array_task_id=${SLURM_ARRAY_TASK_ID}
 EOF
 
-echo "===== GPU CHECK ====="
+        echo "Launching ${EXPERIMENT_NAME} on GPU ${GPU_ID}"
 
-which python
+        (
+            export CUDA_VISIBLE_DEVICES="$GPU_ID"
 
-python - <<'EOF'
-import torch
+            python -u train.py \
+              --outdir="$OUTDIR" \
+              --data="$DATASET" \
+              --cfg=low_shot \
+              --mirror=true \
+              --gpus=1 \
+              --seed="$SEED" \
+              --kimg="$TRAIN_KIMG" \
+              --snap=10 \
+              --metrics=fid50k_full
 
-print("PyTorch:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-print("CUDA version:", torch.version.cuda)
+        ) > "$LOGFILE" 2>&1 &
 
-if not torch.cuda.is_available():
-    raise RuntimeError("CUDA is not available.")
+        PIDS+=("$!")
+        TASK_INDEX=$((TASK_INDEX + 1))
 
-print("GPU:", torch.cuda.get_device_name(0))
-EOF
+    done
+done
 
-nvidia-smi
+STATUS=0
 
-echo "====================="
+for PID in "${PIDS[@]}"; do
+    if ! wait "$PID"; then
+        STATUS=1
+    fi
+done
 
-python -u train.py \
-  --outdir="$OUTDIR" \
-  --data="$DATASET" \
-  --cfg=low_shot \
-  --mirror=true \
-  --gpus=1 \
-  --seed="$SEED" \
-  --kimg="$TRAIN_KIMG" \
-  --snap=10 \
-  --metrics=fid50k_full
+if [ "$STATUS" -eq 0 ]; then
+    echo "All baseline experiments completed successfully."
+else
+    echo "One or more baseline experiments failed."
+fi
+
+exit "$STATUS"
