@@ -8,7 +8,7 @@ OUTDIR_ROOT="/workspace/thesis/calibration/runs/mou-target-recalibration"
 LOGDIR="/workspace/thesis/calibration/logs"
 
 # Values to evaluate.
-ANDA_TARGETS=(0.20 0.40 0.60)
+ANDA_TARGETS=(0.70 0.80 0.90)
 
 # Fixed values.
 ANDA_INTERVAL=4
