@@ -2,9 +2,11 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/workspace/thesis/baseline"
+export PATH="/opt/conda/bin:$PATH"
 
-OBAMA_DATASET="/workspace/thesis/obama.zip"
+PROJECT_DIR="/workspace/thesis/baseline/Training_ANDA"
+
+OBAMA_DATASET="/workspace/thesis/100-shot-obama.zip"
 PANDA_DATASET="/workspace/thesis/100-shot-panda.zip"
 
 OUTDIR_ROOT="/workspace/thesis/baseline/runs/anda-original"
@@ -28,7 +30,7 @@ mkdir -p "$OUTDIR_ROOT" "$LOGDIR"
 
 cd "$PROJECT_DIR"
 
-GIT_BRANCH="$(git branch --show-current)"
+GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 GIT_COMMIT="$(git rev-parse --short HEAD)"
 
 echo "===== GPU CHECK ====="
@@ -41,7 +43,7 @@ TASK_INDEX=0
 for DATASET_INDEX in "${!DATASETS[@]}"; do
     for SEED_INDEX in "${!SEEDS[@]}"; do
 
-        GPU_ID=$((TASK_INDEX + 3))
+        GPU_ID="$TASK_INDEX"
 
         DATASET="${DATASETS[$DATASET_INDEX]}"
         DATASET_NAME="${DATASET_NAMES[$DATASET_INDEX]}"
@@ -99,8 +101,11 @@ done
 
 if [ "$STATUS" -eq 0 ]; then
     echo "All baseline experiments completed successfully."
+    echo "Stopping RunPod..."
+    runpodctl pod stop "$RUNPOD_POD_ID" || true
 else
     echo "One or more baseline experiments failed."
+    echo "RunPod will remain running for debugging."
 fi
 
 exit "$STATUS"
