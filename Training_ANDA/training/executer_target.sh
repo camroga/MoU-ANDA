@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_DIR="/workspace/thesis/calibration/Training_ANDA"
-DATASET="/workspace/thesis/obama.zip"
+DATASET="/workspace/thesis/100-shot-obama.zip"
 OUTDIR_ROOT="/workspace/thesis/calibration/runs/mou-target-recalibration"
 LOGDIR="/workspace/thesis/calibration/logs"
 
