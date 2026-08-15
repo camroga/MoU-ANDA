@@ -21,7 +21,7 @@ mkdir -p "$OUTDIR_ROOT" "$LOGDIR"
 
 cd "$PROJECT_DIR"
 
-GIT_BRANCH="$(git branch --show-current)"
+GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 GIT_COMMIT="$(git rev-parse --short HEAD)"
 
 echo "===== GPU CHECK ====="
@@ -77,6 +77,7 @@ EOF
           --anda-interval="$ANDA_INTERVAL" \
           --anda-kimg="$ANDA_KIMG" \
           --mou-epsilon="$MOU_EPSILON"
+
     ) > "$LOGFILE" 2>&1 &
 
     PIDS+=("$!")
@@ -92,11 +93,11 @@ done
 
 if [ "$STATUS" -eq 0 ]; then
     echo "All target recalibration experiments completed successfully."
+    echo "Stopping RunPod..."
+    runpodctl pod stop "$RUNPOD_POD_ID" || true
 else
     echo "One or more target experiments failed."
+    echo "RunPod will remain running for debugging."
 fi
-
-echo "Stopping RunPod..."
-runpodctl pod stop "$RUNPOD_POD_ID" || true
 
 exit "$STATUS"
