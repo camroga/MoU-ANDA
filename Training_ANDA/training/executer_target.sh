@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/workspace/thesis/calibration/Training_ANDA"
+PROJECT_DIR="/workspace/thesis/calibration"
 DATASET="/workspace/thesis/obama.zip"
 OUTDIR_ROOT="/workspace/thesis/calibration/runs/mou-target-recalibration"
 LOGDIR="/workspace/thesis/calibration/logs"
@@ -97,5 +97,8 @@ if [ "$STATUS" -eq 0 ]; then
 else
     echo "One or more target experiments failed."
 fi
+
+echo "Stopping RunPod..."
+runpodctl pod stop "$RUNPOD_POD_ID" || true
 
 exit "$STATUS"
