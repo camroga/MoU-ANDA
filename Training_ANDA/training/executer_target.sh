@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/workspace/thesis/calibration"
+PROJECT_DIR="/workspace/thesis/calibration/Training_ANDA"
 DATASET="/workspace/thesis/obama.zip"
 OUTDIR_ROOT="/workspace/thesis/calibration/runs/mou-target-recalibration"
 LOGDIR="/workspace/thesis/calibration/logs"
@@ -31,7 +31,6 @@ echo "====================="
 PIDS=()
 
 for IDX in "${!ANDA_TARGETS[@]}"; do
-
     GPU_ID="$IDX"
     ANDA_TARGET="${ANDA_TARGETS[$IDX]}"
 
@@ -78,7 +77,6 @@ EOF
           --anda-interval="$ANDA_INTERVAL" \
           --anda-kimg="$ANDA_KIMG" \
           --mou-epsilon="$MOU_EPSILON"
-
     ) > "$LOGFILE" 2>&1 &
 
     PIDS+=("$!")
