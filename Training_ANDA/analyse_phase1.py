@@ -5,13 +5,13 @@ import glob
 import os
 import matplotlib.pyplot as plt
 
-BASE_DIR = "/workspace/thesis/calibration/runs/mou-target-recalibration"
-OUTPUT_DIR = "/workspace/thesis/calibration/runs/analyse_phase1"
+BASE_DIR = "/workspace/thesis/calibration/runs/mou-target-recalibration-inverted"
+OUTPUT_DIR = "/workspace/thesis/calibration/runs/analyse_phase1_inverted"
 
 TARGETS = {
+    "0p50": "0.50",
+    "0p60": "0.60",
     "0p70": "0.70",
-    "0p80": "0.80",
-    "0p90": "0.90",
 }
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -175,7 +175,7 @@ for target_dir, target_label in TARGETS.items():
 
 
 if found == 0:
-    raise RuntimeError("No Phase 1 experiment files found.")
+    raise RuntimeError("No inverted Phase 1 experiment files found.")
 
 
 # ======================================================
@@ -192,7 +192,7 @@ plt.tight_layout()
 
 pdf_path = os.path.join(
     OUTPUT_DIR,
-    "phase1_mou_uncertainty.pdf"
+    "phase1_inverted_mou_uncertainty.pdf"
 )
 
 plt.savefig(
@@ -218,19 +218,9 @@ def write_table(data, filename, caption, label):
 
         f.write("\\begin{table}[t]\n")
         f.write("\\centering\n")
-
-        f.write(
-            f"\\caption{{{caption}}}\n"
-        )
-
-        f.write(
-            f"\\label{{{label}}}\n"
-        )
-
-        f.write(
-            "\\begin{tabular}{cccccc}\n"
-        )
-
+        f.write(f"\\caption{{{caption}}}\n")
+        f.write(f"\\label{{{label}}}\n")
+        f.write("\\begin{tabular}{cccccc}\n")
         f.write("\\hline\n")
 
         f.write(
@@ -271,9 +261,9 @@ best_results = sorted(
 
 best_table = write_table(
     best_results,
-    "phase1_best_fid.tex",
+    "phase1_inverted_best_fid.tex",
     "Phase 1 target recalibration results ordered by best FID50k.",
-    "tab:phase1_best_fid",
+    "tab:phase1_inverted_best_fid",
 )
 
 
@@ -288,9 +278,9 @@ final_results = sorted(
 
 final_table = write_table(
     final_results,
-    "phase1_final_fid.tex",
+    "phase1_inverted_final_fid.tex",
     "Phase 1 target recalibration results ordered by final FID50k.",
-    "tab:phase1_final_fid",
+    "tab:phase1_inverted_final_fid",
 )
 
 
