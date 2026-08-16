@@ -4,11 +4,12 @@ set -euo pipefail
 
 PROJECT_DIR="/workspace/thesis/calibration/Training_ANDA"
 DATASET="/workspace/thesis/100-shot-obama.zip"
-OUTDIR_ROOT="/workspace/thesis/calibration/runs/mou-target-recalibration"
-LOGDIR="/workspace/thesis/calibration/logs"
+
+OUTDIR_ROOT="/workspace/thesis/calibration/runs/mou-target-recalibration-inverted"
+LOGDIR="/workspace/thesis/calibration/logs-inverted"
 
 # Values to evaluate.
-ANDA_TARGETS=(0.70 0.80 0.90)
+ANDA_TARGETS=(0.50 0.60 0.70)
 
 # Fixed values.
 ANDA_INTERVAL=4
@@ -38,6 +39,7 @@ for IDX in "${!ANDA_TARGETS[@]}"; do
     EPSILON_LABEL="${MOU_EPSILON/./p}"
 
     EXPERIMENT_NAME="target-${TARGET_LABEL}-akimg-${ANDA_KIMG}-epsilon-${EPSILON_LABEL}-seed-${SEED}"
+
     OUTDIR="${OUTDIR_ROOT}/${EXPERIMENT_NAME}"
     LOGFILE="${LOGDIR}/${EXPERIMENT_NAME}.log"
 
@@ -46,14 +48,21 @@ for IDX in "${!ANDA_TARGETS[@]}"; do
     cat > "${OUTDIR}/submitted_configuration.txt" <<EOF
 experiment=${EXPERIMENT_NAME}
 gpu=${GPU_ID}
+
+controller_direction=real_anda_minus_target
+
 anda_target=${ANDA_TARGET}
 anda_interval=${ANDA_INTERVAL}
 anda_kimg=${ANDA_KIMG}
+
 mou_epsilon=${MOU_EPSILON}
+
 pseudo_weight=0.20
 generated_weight=0.80
+
 training_kimg=${TRAIN_KIMG}
 seed=${SEED}
+
 git_branch=${GIT_BRANCH}
 git_commit=${GIT_COMMIT}
 EOF
@@ -92,9 +101,14 @@ for PID in "${PIDS[@]}"; do
 done
 
 if [ "$STATUS" -eq 0 ]; then
-    echo "All target recalibration experiments completed successfully."
-    echo "Stopping RunPod..."
-    runpodctl pod stop "$RUNPOD_POD_ID" || true
+    echo "All inverted-controller target experiments completed successfully."
+
+    if [ -n "${RUNPOD_POD_ID:-}" ]; then
+        echo "Stopping RunPod..."
+        runpodctl pod stop "$RUNPOD_POD_ID" || true
+    else
+        echo "RUNPOD_POD_ID not set; stop the Pod manually."
+    fi
 else
     echo "One or more target experiments failed."
     echo "RunPod will remain running for debugging."

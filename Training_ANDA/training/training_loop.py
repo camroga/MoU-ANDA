@@ -323,7 +323,7 @@ def training_loop(
         # Execute ANDA heuristic (independent controller; never touches augment_pipe.p).
         if (anda_stats is not None) and (batch_idx % anda_interval == 0):
             anda_stats.update()
-            adjust_anda = np.sign(anda_target - anda_stats['Loss/signs/real_anda']) * (batch_size * anda_interval) / (anda_kimg * 1000)
+            adjust_anda = np.sign(anda_stats['Loss/signs/real_anda'] - anda_target) * (batch_size * anda_interval) / (anda_kimg * 1000)
             augment_pipe.p_anda.copy_((augment_pipe.p_anda + adjust_anda).clamp(0, 1))
 
         # Perform maintenance tasks once per tick.
