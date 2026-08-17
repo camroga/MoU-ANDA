@@ -11,16 +11,27 @@ export PATH="/opt/conda/bin:$PATH"
 
 PROJECT_DIR="/workspace/thesis/calibration/Training_ANDA"
 
-DATASET="/workspace/thesis/100-shot-obama.zip"
+# Persistent storage.
+PERSISTENT_DATASET=\
+"/workspace/thesis/100-shot-obama.zip"
 
-OUTDIR_ROOT=\
+PERSISTENT_OUTDIR_ROOT=\
 "/workspace/thesis/calibration/runs/mou-independent-anda-grid"
 
-LOGDIR=\
+PERSISTENT_LOGDIR=\
 "/workspace/thesis/calibration/logs-phase2"
 
-mkdir -p "$OUTDIR_ROOT"
-mkdir -p "$LOGDIR"
+# Local storage used during training.
+LOCAL_ROOT="/tmp/mou-anda-phase2"
+
+DATASET=\
+"${LOCAL_ROOT}/100-shot-obama.zip"
+
+OUTDIR_ROOT=\
+"${LOCAL_ROOT}/runs/mou-independent-anda-grid"
+
+LOGDIR=\
+"${LOCAL_ROOT}/logs-phase2"
 
 
 # ---------------------------------------------------------
@@ -61,6 +72,24 @@ STATUS=0
 
 
 # ---------------------------------------------------------
+# PREPARE STORAGE
+# ---------------------------------------------------------
+
+mkdir -p "$PERSISTENT_OUTDIR_ROOT"
+mkdir -p "$PERSISTENT_LOGDIR"
+
+# Start with clean local storage.
+rm -rf "$LOCAL_ROOT"
+
+mkdir -p "$OUTDIR_ROOT"
+mkdir -p "$LOGDIR"
+
+echo "Copying dataset to local storage..."
+
+cp "$PERSISTENT_DATASET" "$DATASET"
+
+
+# ---------------------------------------------------------
 # CHECK ENVIRONMENT
 # ---------------------------------------------------------
 
@@ -76,11 +105,17 @@ echo "ANDA interval:  ${ANDA_INTERVAL}"
 echo "Training kimg:  ${TRAIN_KIMG}"
 echo "Seed:           ${SEED}"
 echo "GPUs:           ${NUM_GPUS}"
-echo "Output root:    ${OUTDIR_ROOT}"
-echo "Logs:           ${LOGDIR}"
+echo "Local output:   ${OUTDIR_ROOT}"
+echo "Local logs:     ${LOGDIR}"
+echo "Persistent:     ${PERSISTENT_OUTDIR_ROOT}"
 echo "=========================================="
 
 echo
+echo "===== LOCAL DISK ====="
+df -h /tmp
+echo "======================"
+echo
+
 echo "===== GPU CHECK ====="
 
 which python
@@ -301,24 +336,109 @@ EOF
 
     done
 
+
+    # -----------------------------------------------------
+    # COPY BATCH TO PERSISTENT STORAGE
+    # -----------------------------------------------------
+
+    echo
+    echo "Copying batch ${BATCH} to persistent storage..."
+
+    COPY_FAILED=1
+
+    for ATTEMPT in 1 2 3; do
+
+        echo "Copy attempt ${ATTEMPT}/3..."
+
+        if \
+            cp -a \
+                "${OUTDIR_ROOT}/." \
+                "${PERSISTENT_OUTDIR_ROOT}/" \
+            && \
+            cp -a \
+                "${LOGDIR}/." \
+                "${PERSISTENT_LOGDIR}/"
+        then
+
+            COPY_FAILED=0
+            break
+
+        fi
+
+        echo "Copy failed. Retrying in 10 seconds..."
+        sleep 10
+
+    done
+
+
+    if (( COPY_FAILED != 0 )); then
+
+        echo
+        echo "ERROR:"
+        echo "Could not copy batch ${BATCH}"
+        echo "to persistent storage."
+
+        echo
+        echo "Local results are still available at:"
+        echo "${LOCAL_ROOT}"
+
+        STATUS=1
+        break
+
+    fi
+
+
+    # -----------------------------------------------------
+    # CHECK TRAINING STATUS
+    # -----------------------------------------------------
+
     if (( FAILED != 0 )); then
 
         echo
         echo "ERROR:"
         echo "At least one experiment in batch ${BATCH}"
-        echo "failed. Check:"
-        echo "${LOGDIR}"
+        echo "failed."
+
+        echo
+        echo "Partial results were copied to:"
+        echo "${PERSISTENT_OUTDIR_ROOT}"
+
+        echo
+        echo "Logs were copied to:"
+        echo "${PERSISTENT_LOGDIR}"
+
+        echo
+        echo "Local files were preserved at:"
+        echo "${LOCAL_ROOT}"
 
         STATUS=1
         break
 
-    else
-
-        echo
-        echo "Batch ${BATCH} completed successfully."
-        echo
-
     fi
+
+
+    # -----------------------------------------------------
+    # BATCH SUCCESS
+    # -----------------------------------------------------
+
+    echo
+    echo "Batch ${BATCH} completed successfully."
+    echo "Results copied to persistent storage."
+    echo
+
+    echo "Local disk usage before cleanup:"
+    df -h /tmp
+    echo
+
+    # Free local disk before the next batch.
+    rm -rf "$OUTDIR_ROOT"
+    rm -rf "$LOGDIR"
+
+    mkdir -p "$OUTDIR_ROOT"
+    mkdir -p "$LOGDIR"
+
+    echo "Local storage cleaned."
+    echo
 
 done
 
@@ -333,13 +453,26 @@ echo "Phase 2 training finished."
 echo "=========================================="
 
 echo
-echo "Results:"
-echo "${OUTDIR_ROOT}"
+echo "Persistent results:"
+echo "${PERSISTENT_OUTDIR_ROOT}"
 
 echo
-echo "Logs:"
-echo "${LOGDIR}"
+echo "Persistent logs:"
+echo "${PERSISTENT_LOGDIR}"
 echo
+
+
+# ---------------------------------------------------------
+# CLEAN LOCAL STORAGE AFTER SUCCESS
+# ---------------------------------------------------------
+
+if [ "$STATUS" -eq 0 ]; then
+
+    echo "Cleaning local Phase 2 files..."
+
+    rm -rf "$LOCAL_ROOT"
+
+fi
 
 
 # ---------------------------------------------------------
@@ -348,6 +481,7 @@ echo
 
 if [ "$STATUS" -eq 0 ]; then
 
+    echo
     echo "Running Phase 2 analysis..."
     echo
 
