@@ -35,7 +35,6 @@ ANDA_KIMGS=(
     400
     500
     750
-    1000
 )
 
 MOU_EPSILONS=(
@@ -51,7 +50,7 @@ SEED=1
 TRAIN_KIMG=400
 
 # RunPod configuration.
-NUM_GPUS=8
+NUM_GPUS=6
 
 
 # ---------------------------------------------------------
@@ -311,6 +310,7 @@ EOF
         echo "${LOGDIR}"
 
         STATUS=1
+        break
 
     else
 

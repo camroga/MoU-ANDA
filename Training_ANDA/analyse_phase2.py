@@ -22,7 +22,7 @@ OUTPUT.mkdir(exist_ok=True)
 
 # Phase 2 calibration grid
 targets = [0.70]
-k_values = [400, 500, 750, 1000]
+k_values = [400, 500, 750]
 epsilons = [0.15, 0.20, 0.25, 0.30]
 
 # ---------------------------------------------------------
