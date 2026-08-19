@@ -53,6 +53,10 @@ def setup_training_loop_kwargs(
     aug        = None, # Augmentation mode: 'ada' (default), 'noaug', 'fixed'
     p          = None, # Specify p for 'fixed' (required): <float>
     target     = None, # Override ADA target for 'ada': <float>, default = depends on aug
+    anda_target= None, # Override ANDA target: <float>, default = depends on aug
+    anda_interval= None, # Override ANDA interval: <int>, default = 4
+    anda_kimg  = None, # Override ANDA kimg: <int>, default = 500
+    mou_epsilon= None, # Override MoU epsilon: <float>, default = 0.2
     augpipe    = None, # Augmentation pipeline: 'blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc' (default), ..., 'bgcfnc'
 
     # Transfer learning.
@@ -257,6 +261,33 @@ def setup_training_loop_kwargs(
     else:
         raise UserError(f'--aug={aug} not supported')
 
+    # ---------------------------------------------------
+    # MoU-based ANDA controller: anda_target, anda_interval, anda_kimg, mou_epsilon
+    # ---------------------------------------------------
+    if anda_target is not None:
+        assert isinstance(anda_target, float)
+        if not -1 <= anda_target <= 1:
+            raise UserError('--anda-target must be between -1 and 1')
+        args.anda_target = anda_target
+
+    if anda_interval is not None:
+        assert isinstance(anda_interval, int)
+        if anda_interval < 1:
+            raise UserError('--anda-interval must be at least 1')
+        args.anda_interval = anda_interval
+
+    if anda_kimg is not None:
+        assert isinstance(anda_kimg, int)
+        if anda_kimg < 1:
+            raise UserError('--anda-kimg must be at least 1')
+        args.anda_kimg = anda_kimg
+
+    if mou_epsilon is not None:
+        assert isinstance(mou_epsilon, float)
+        if mou_epsilon < 0:
+            raise UserError('--mou-epsilon must be non-negative')
+        args.loss_kwargs.mou_epsilon = mou_epsilon
+
     if p is not None:
         assert isinstance(p, float)
         if aug != 'fixed':
@@ -438,6 +469,10 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--aug', help='Augmentation mode [default: ada]', type=click.Choice(['noaug', 'ada', 'fixed']))
 @click.option('--p', help='Augmentation probability for --aug=fixed', type=float)
 @click.option('--target', help='ADA target value for --aug=ada', type=float)
+@click.option('--anda-target', help='Target value for the independent MoU-based ANDA controller', type=float)
+@click.option('--anda-interval', help='How often to update the independent ANDA controller', type=int, default=4, show_default=True)
+@click.option('--anda-kimg', help='Adjustment speed for the independent ANDA controller', type=int, default=500, show_default=True)
+@click.option('--mou-epsilon', help='Margin of Uncertainty threshold', type=float, default=0.2, show_default=True)
 @click.option('--augpipe', help='Augmentation pipeline [default: bgc]', type=click.Choice(['blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc', 'bgcf', 'bgcfn', 'bgcfnc']))
 
 # Transfer learning.

@@ -124,6 +124,7 @@ class AugmentPipe(torch.nn.Module):
     ):
         super().__init__()
         self.register_buffer('p', torch.ones([]))       # Overall multiplier for augmentation probability.
+        self.register_buffer('p_anda', torch.zeros([])) # ANDA probability, independent of ADA's `p`. Not used by the augmentation pipeline itself.
 
         # Pixel blitting.
         self.xflip            = float(xflip)            # Probability multiplier for x-flip.
